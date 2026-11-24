@@ -1,0 +1,171 @@
+name: ToolCabinetApi CI/CD
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches-ignore: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-publish:
+    name: Build, test and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Check selected branch contains the application
+        shell: pwsh
+        run: |
+          if (-not (Test-Path ToolCabinetApi.slnx)) { throw 'Select an application branch (for example server) in Run workflow. main stores only workflow configuration.' }
+
+      - name: Install .NET SDK 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore ToolCabinetApi.slnx
+
+      - name: Build
+        run: dotnet build ToolCabinetApi.slnx --configuration Release --no-restore
+
+      - name: Run integration tests
+        run: dotnet test ToolCabinetApi.slnx --configuration Release --no-build --logger trx --results-directory TestResults
+
+      - name: Publish API
+        run: dotnet publish src/ToolCabinetApi/ToolCabinetApi.csproj --configuration Release --no-build --output artifacts/publish -p:UseAppHost=false
+
+      - name: Record source commit
+        shell: pwsh
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+        run: |
+          @{
+            commit = $env:COMMIT_SHA
+            repository = $env:SOURCE_REPOSITORY
+            runId = $env:WORKFLOW_RUN_ID
+          } | ConvertTo-Json | Set-Content artifacts/publish/build-info.json -Encoding utf8
+
+      - name: Upload published API
+        uses: actions/upload-artifact@v4
+        with:
+          name: ToolCabinetApi-${{ github.sha }}
+          path: artifacts/publish/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload test results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ github.sha }}
+          path: TestResults/**/*.trx
+          if-no-files-found: ignore
+          retention-days: 14
+
+  docker:
+    name: Build and check Docker image
+    needs: build-test-publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      COMMIT_SHA: ${{ github.sha }}
+      SOURCE_REPOSITORY: ${{ github.repository }}
+      WORKFLOW_RUN_ID: ${{ github.run_id }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Build Docker image
+        run: |
+          docker build --platform linux/amd64 --label "org.opencontainers.image.revision=$env:COMMIT_SHA" --tag "toolcabinetapi:$env:COMMIT_SHA" .
+          if ($LASTEXITCODE -ne 0) { throw 'Docker build failed' }
+
+      - name: Check container health over HTTP
+        run: ./scripts/Test-Container.ps1 -Image "toolcabinetapi:$env:COMMIT_SHA"
+
+      - name: Save checked Docker image
+        run: |
+          New-Item -ItemType Directory -Force artifacts/docker | Out-Null
+          $image = "toolcabinetapi:$env:COMMIT_SHA"
+          docker image save --output artifacts/docker/toolcabinetapi.tar $image
+          if ($LASTEXITCODE -ne 0) { throw 'Docker image export failed' }
+          $imageId = docker image inspect --format '{{.Id}}' $image
+          if ($LASTEXITCODE -ne 0) { throw 'Docker image inspection failed' }
+          @{
+            commit = $env:COMMIT_SHA
+            repository = $env:SOURCE_REPOSITORY
+            runId = $env:WORKFLOW_RUN_ID
+            image = $image
+            imageId = $imageId
+            platform = 'linux/amd64'
+            archive = 'toolcabinetapi.tar'
+            sha256 = (Get-FileHash artifacts/docker/toolcabinetapi.tar -Algorithm SHA256).Hash.ToLowerInvariant()
+          } | ConvertTo-Json | Set-Content artifacts/docker/build-info.json -Encoding utf8
+
+      - name: Upload checked Docker image
+        uses: actions/upload-artifact@v4
+        with:
+          name: ToolCabinetApi-docker-${{ github.sha }}
+          path: artifacts/docker/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  deploy:
+    name: Deploy to Windows stand
+    needs: docker
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && github.ref != 'refs/heads/main' && vars.TOOLCABINET_CD_ENABLED == 'true' }}
+    runs-on: [self-hosted, Windows, X64, toolcabinet-stand]
+    environment: training
+    timeout-minutes: 10
+    concurrency:
+      group: toolcabinet-training
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: powershell
+    env:
+      COMMIT_SHA: ${{ github.sha }}
+      SOURCE_REPOSITORY: ${{ github.repository }}
+      WORKFLOW_RUN_ID: ${{ github.run_id }}
+      DEPLOY_DIRECTORY: ${{ vars.TOOLCABINET_DEPLOY_DIR }}
+      DEPLOY_PORT: ${{ vars.TOOLCABINET_PORT }}
+
+    steps:
+      - name: Checkout manually selected commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Download checked image from this CI run
+        uses: actions/download-artifact@v4
+        with:
+          name: ToolCabinetApi-docker-${{ github.sha }}
+          path: ${{ runner.temp }}/toolcabinet-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Deploy and check installed API
+        env:
+          ARTIFACT_DIRECTORY: ${{ runner.temp }}/toolcabinet-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:DEPLOY_DIRECTORY)) { throw 'Set TOOLCABINET_DEPLOY_DIR in repository variables' }
+          $port = 5090
+          if (-not [string]::IsNullOrWhiteSpace($env:DEPLOY_PORT)) { $port = [int]$env:DEPLOY_PORT }
+          ./scripts/Deploy-Container.ps1 -ArtifactDirectory $env:ARTIFACT_DIRECTORY -DeployDirectory $env:DEPLOY_DIRECTORY -ExpectedCommit $env:COMMIT_SHA -ExpectedRepository $env:SOURCE_REPOSITORY -ExpectedRunId $env:WORKFLOW_RUN_ID -Port $port

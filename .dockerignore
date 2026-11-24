@@ -1,0 +1,11 @@
+**
+!global.json
+!src/
+!src/ToolCabinetApi/
+!src/ToolCabinetApi/**
+src/ToolCabinetApi/bin/
+src/ToolCabinetApi/obj/
+**/*.user
+**/*.suo
+**/.env
+**/.env.*

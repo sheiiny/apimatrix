@@ -65,3 +65,56 @@ jobs:
           path: TestResults/**/*.trx
           if-no-files-found: ignore
           retention-days: 14
+
+  docker:
+    name: Build and check Docker image
+    needs: build-test-publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      COMMIT_SHA: ${{ github.sha }}
+      SOURCE_REPOSITORY: ${{ github.repository }}
+      WORKFLOW_RUN_ID: ${{ github.run_id }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          docker build --platform linux/amd64 --label "org.opencontainers.image.revision=$env:COMMIT_SHA" --tag "toolcabinetapi:$env:COMMIT_SHA" .
+          if ($LASTEXITCODE -ne 0) { throw 'Docker build failed' }
+
+      - name: Check container health over HTTP
+        run: ./scripts/Test-Container.ps1 -Image "toolcabinetapi:$env:COMMIT_SHA"
+
+      - name: Save checked Docker image
+        run: |
+          New-Item -ItemType Directory -Force artifacts/docker | Out-Null
+          $image = "toolcabinetapi:$env:COMMIT_SHA"
+          docker image save --output artifacts/docker/toolcabinetapi.tar $image
+          if ($LASTEXITCODE -ne 0) { throw 'Docker image export failed' }
+          $imageId = docker image inspect --format '{{.Id}}' $image
+          if ($LASTEXITCODE -ne 0) { throw 'Docker image inspection failed' }
+          @{
+            commit = $env:COMMIT_SHA
+            repository = $env:SOURCE_REPOSITORY
+            runId = $env:WORKFLOW_RUN_ID
+            image = $image
+            imageId = $imageId
+            platform = 'linux/amd64'
+            archive = 'toolcabinetapi.tar'
+            sha256 = (Get-FileHash artifacts/docker/toolcabinetapi.tar -Algorithm SHA256).Hash.ToLowerInvariant()
+          } | ConvertTo-Json | Set-Content artifacts/docker/build-info.json -Encoding utf8
+
+      - name: Upload checked Docker image
+        uses: actions/upload-artifact@v4
+        with:
+          name: ToolCabinetApi-docker-${{ github.sha }}
+          path: artifacts/docker/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

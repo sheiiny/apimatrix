@@ -144,6 +144,8 @@ dotnet artifacts/publish/ToolCabinetApi.dll --urls http://127.0.0.1:5080
 
 На стенде должны быть запущены Docker Desktop с Linux engine и Windows runner с метками `self-hosted`, `Windows`, `X64`, `toolcabinet-stand`. Облачные задачи сборки и тестов на этот runner не назначаются. Runner должен запускаться под той же учётной записью, которая имеет доступ к Docker Desktop и каталогу стенда.
 
+Шаг CD запускает Windows PowerShell с `-ExecutionPolicy Bypass` только для своего процесса, чтобы политика `Restricted` на компьютере не блокировала временный скрипт GitHub Actions и сценарий развёртывания. Системная и пользовательская политики выполнения не меняются. Необработанная ошибка сценария завершает шаг с ошибкой.
+
 Runner уже зарегистрирован пользователем. Для ручного запуска после перезагрузки:
 
 ```powershell

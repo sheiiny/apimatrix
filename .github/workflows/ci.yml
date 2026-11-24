@@ -140,7 +140,7 @@ jobs:
       cancel-in-progress: false
     defaults:
       run:
-        shell: powershell
+        shell: powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"
     env:
       COMMIT_SHA: ${{ github.sha }}
       SOURCE_REPOSITORY: ${{ github.repository }}
@@ -165,6 +165,7 @@ jobs:
         env:
           ARTIFACT_DIRECTORY: ${{ runner.temp }}/toolcabinet-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
+          $ErrorActionPreference = 'Stop'
           if ([string]::IsNullOrWhiteSpace($env:DEPLOY_DIRECTORY)) { throw 'Set TOOLCABINET_DEPLOY_DIR in repository variables' }
           $port = 5090
           if (-not [string]::IsNullOrWhiteSpace($env:DEPLOY_PORT)) { $port = [int]$env:DEPLOY_PORT }

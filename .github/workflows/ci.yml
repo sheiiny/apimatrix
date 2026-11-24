@@ -1,4 +1,4 @@
-name: ToolCabinetApi CI
+name: ToolCabinetApi CI/CD
 
 on:
   pull_request:
@@ -118,3 +118,44 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
+
+  deploy:
+    name: Deploy to Windows stand
+    needs: docker
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.TOOLCABINET_CD_ENABLED == 'true' }}
+    runs-on: [self-hosted, Windows, X64, toolcabinet-stand]
+    environment: training
+    timeout-minutes: 10
+    concurrency:
+      group: toolcabinet-training
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: powershell
+    env:
+      COMMIT_SHA: ${{ github.sha }}
+      SOURCE_REPOSITORY: ${{ github.repository }}
+      WORKFLOW_RUN_ID: ${{ github.run_id }}
+      DEPLOY_DIRECTORY: ${{ vars.TOOLCABINET_DEPLOY_DIR }}
+      DEPLOY_PORT: ${{ vars.TOOLCABINET_PORT }}
+
+    steps:
+      - name: Checkout trusted main commit
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download checked image from this CI run
+        uses: actions/download-artifact@v4
+        with:
+          name: ToolCabinetApi-docker-${{ github.sha }}
+          path: ${{ runner.temp }}/toolcabinet-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Deploy and check installed API
+        env:
+          ARTIFACT_DIRECTORY: ${{ runner.temp }}/toolcabinet-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:DEPLOY_DIRECTORY)) { throw 'Set TOOLCABINET_DEPLOY_DIR in repository variables' }
+          $port = 5090
+          if (-not [string]::IsNullOrWhiteSpace($env:DEPLOY_PORT)) { $port = [int]$env:DEPLOY_PORT }
+          ./scripts/Deploy-Container.ps1 -ArtifactDirectory $env:ARTIFACT_DIRECTORY -DeployDirectory $env:DEPLOY_DIRECTORY -ExpectedCommit $env:COMMIT_SHA -ExpectedRepository $env:SOURCE_REPOSITORY -ExpectedRunId $env:WORKFLOW_RUN_ID -Port $port
